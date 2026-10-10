@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Sean Rieb
+# SPDX-License-Identifier: MIT
+
 """
 boot.py
 

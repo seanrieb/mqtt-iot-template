@@ -1,25 +1,33 @@
+# Copyright (c) 2026 Sean Rieb
+# SPDX-License-Identifier: MIT
+
 """
 main.py
 
 Runs 2nd after boot.py finishes and MicroPython is initialized.
 """
 import gc
-
-import uasyncio as asyncio
-import _thread
-import gc
+import os
 import sys
 import utime
-from machine import Pin
+import uasyncio as asyncio
+
 import net
+from config import NETWORK, MQTT
 from async_mqtt import MQTTClient
 from async_mqtt.async_dns import Resolver
 from blinky import Blinky
 
-_dns: Resolver = None
+# RP2040/RP2350 and ESP32 support _thread. ESP32 does not promise
+# that the worker executes on a separate CPU core.
+_USE_THREAD = os.uname().sysname in ("rp2", "esp32")
+if _USE_THREAD:
+    import _thread
+
+_dns = None
 
 ###############################################################################
-# Shared between core 0 and core 1
+# Shared between asyncio and the worker thread
 ###############################################################################
 
 # Shared, preallocated state:
@@ -32,14 +40,14 @@ _STOP = const(0)
 _DONE = const(1)
 _FAILED = const(2)
 
-# Safely signals the asyncio loop from core 1.
+# Safely signals the asyncio loop from the worker thread.
 _worker_changed = asyncio.ThreadSafeFlag()
 
 ###############################################################################
-# CORE 1
+# WORKER THREAD (RP: second core; ESP32: threading without core affinity)
 ###############################################################################
 
-# Core 1 things to avoid:
+# Worker thread things to avoid (particularly on RP boards):
 #  Unprotected Shared Data
 #    - Simultaneous variable access: Do not read or write global/shared variables across
 #      Core 0 and Core 1 without using _thread.allocate_lock().
@@ -73,10 +81,10 @@ def core1_worker():
   except BaseException as e:
     _worker_state[_FAILED] = 1
     try:
-      print("Unhandled exception on core 1:")
+      print("Unhandled exception in worker thread:")
       sys.print_exception(e)
     except:
-      print("Unable to print core-1 exception")
+      print("Unable to print worker exception")
   finally:
     _worker_state[_DONE] = 1
     try:
@@ -86,7 +94,7 @@ def core1_worker():
 
 
 ###############################################################################
-# CORE 0
+# MAIN ASYNCIO THREAD
 ###############################################################################
 
 
@@ -95,7 +103,7 @@ async def monitor_core1():
     await _worker_changed.wait()
 
   if _worker_state[_FAILED]:
-    raise RuntimeError("Core 1 terminated with an exception")
+    raise RuntimeError("Worker thread terminated with an exception")
 
 
 async def shutdown_core1(timeout_ms=2000):
@@ -103,7 +111,7 @@ async def shutdown_core1(timeout_ms=2000):
   deadline = utime.ticks_add(utime.ticks_ms(), timeout_ms)
   while not _worker_state[_DONE]:
     if utime.ticks_diff(deadline, utime.ticks_ms()) <= 0:
-      print("Warning: core 1 did not stop before timeout")
+      print("Warning: worker thread did not stop before timeout")
       return False
     await asyncio.sleep_ms(10)
   return True
@@ -112,11 +120,7 @@ async def shutdown_core1(timeout_ms=2000):
 async def net_task():
   global _dns
 
-  net.config["hostname"] = "astest"
-  net.config["country"] = "US"
-  net.config["ssid"] = "OpenWrt"
-  net.config["password"] = ""
-  net.config["reset"] = False
+  net.config.update(NETWORK)
 
   while True:
     await net.init()
@@ -155,36 +159,40 @@ async def on_disconnect(client, error):
 
 
 async def resolve(host, qtype="A"):
-  if _dns is None:
-    return None
-  else:
-    return await _dns.resolve(host, qtype)
+  # Allow the network task to obtain an address before resolving the broker.
+  while _dns is None:
+    await asyncio.sleep_ms(100)
+  return await _dns.resolve(host, qtype)
 
 
 async def main():
   asyncio.create_task(garbage_collector_task())
 
   led = Blinky()
+  if net.nic is None:
+    raise RuntimeError("No supported network interface detected")
   net.nic.active(False)
 
   client = MQTTClient(
-    host="foobar.lan",
-    port=1884,
-    client_id="astest",
+    host=MQTT["host"],
+    port=MQTT.get("port", 1883),
+    client_id=MQTT.get("client_id", "micropython-iot"),
+    username=MQTT.get("username"),
+    password=MQTT.get("password"),
     on_message=on_message,
     on_connect=on_connect,
     on_disconnect=on_disconnect,
-    reconnect_ms_min=200,
-    reconnect_ms_max=1000,
+    reconnect_ms_min=MQTT.get("reconnect_ms_min", 1000),
+    reconnect_ms_max=MQTT.get("reconnect_ms_max", 60000),
     resolve=resolve,
   )
-  await client.subscribe("commands/test/targetState")
+  await client.subscribe(MQTT.get("subscribe_topic", "commands/test/targetState"))
   asyncio.create_task(client.run_forever())
   asyncio.create_task(net_task())
 
   count = 0
   while True:
-    await client.publish(b"states/test/currentState", b"%d" % count)
+    await client.publish(MQTT.get("publish_topic", "states/test/currentState"), b"%d" % count)
     count += 1
     await asyncio.sleep_ms(100)
     led.toggle()
@@ -199,7 +207,7 @@ def wait_for_core1_blocking(timeout_ms=2000):
 
   while not _worker_state[_DONE]:
     if utime.ticks_diff(deadline, utime.ticks_ms()) <= 0:
-      print("Warning: core 1 is still running")
+      print("Warning: worker thread is still running")
       return False
 
     utime.sleep_ms(10)
@@ -211,8 +219,12 @@ def run():
   gc.enable()
   gc.collect()
 
-  # now start thread
-  _thread.start_new_thread(core1_worker, ())
+  # Start the worker on RP and ESP32 platforms.
+  if _USE_THREAD:
+    _worker_state[_STOP] = 0
+    _worker_state[_DONE] = 0
+    _worker_state[_FAILED] = 0
+    _thread.start_new_thread(core1_worker, ())
 
   try:
     asyncio.run(main())
@@ -221,11 +233,12 @@ def run():
     print("\nKeyboard interrupt; shutting down")
 
   except BaseException as exc:
-    print("Fatal exception on core 0:")
+    print("Fatal exception in main thread:")
     sys.print_exception(exc)
 
   finally:
-    wait_for_core1_blocking()
+    if _USE_THREAD:
+      wait_for_core1_blocking()
 
     # Discard references retained by the previous event loop.
     asyncio.new_event_loop()

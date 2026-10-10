@@ -1,7 +1,10 @@
+# Copyright (c) 2026 Sean Rieb
+# SPDX-License-Identifier: MIT
+
 """Portable MicroPython network initialization.
 
 Supported targets:
-  * Raspberry Pi Pico W / Pico 2 W (Wi-Fi)impor
+  * Raspberry Pi Pico W / Pico 2 W (Wi-Fi)
   * ESP32 (Wi-Fi)
   * W5500-EVB-PICO / W5500-EVB-PICO2 (Ethernet)
   * W6300-EVB-PICO / W6300-EVB-PICO2 (Ethernet)
@@ -65,15 +68,19 @@ elif hasattr(network, "WIZNET6K"):
     nic = network.WIZNET6K()
 
 async def init():
-  global nameserver
   if nic is None:
     raise ValueError("Network module not available")
 
-  try:
-    network.hostname(config["hostname"])
-  except AttributeError:
-    print("network: hostname not set")
-  network.country("US")
+  if config["hostname"] is not None:
+    try:
+      network.hostname(config["hostname"])
+    except (AttributeError, OSError):
+      print("network: hostname not supported")
+  if config["country"]:
+    try:
+      network.country(config["country"])
+    except (AttributeError, OSError):
+      pass
 
   if config["reset"]:
     nic.active(False)

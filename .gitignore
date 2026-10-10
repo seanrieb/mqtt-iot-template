@@ -1,27 +1,27 @@
-.DS_Store
+# Local per-device settings and credentials
+config.py
+.env
+.env.*
+!.env.example
+secrets.py
+
+# Python and MicroPython generated files
 __pycache__/
 *.py[cod]
 *.mpy
 .pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
 .venv/
-venv/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Build/log artifacts
+*.log
 build/
 dist/
-*.egg-info/
-.vscode/
-.idea/
-*.swp
-*.log
-.env
-.env.*
-!.env.example
-config.py
-secrets.py
-*.pem
-*.key
-lib/
-.idea/
+
+/lib

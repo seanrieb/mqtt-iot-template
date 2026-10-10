@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Sean Rieb
+# SPDX-License-Identifier: MIT
 
 """Board-independent onboard LED control for MicroPython."""
 
